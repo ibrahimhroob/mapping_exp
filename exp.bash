@@ -35,11 +35,23 @@ PLAY_RATE=0.2
 
 # Set the IP address of the remote machine
 REMOTE_IP=10.5.37.139
-
 BAGS_REMOTE_DIR=/mnt/2564a3b0-8e42-43a4-b917-2b1af0c78052/bacchus/dataset/bags
 
+# Source the ROS environment setup file
 source $CATKIN_WS/devel/setup.bash
 
+# Define a function for error messages
+function error() {
+  printf "${RED}Error: ${1}${NC}\n"
+  exit 1
+}
+
+# Check that the necessary dependencies are installed
+command -v rosbag >/dev/null 2>&1 || error "rosbag command not found"
+command -v roslaunch >/dev/null 2>&1 || error "roslaunch command not found"
+command -v python >/dev/null 2>&1 || error "python command not found"
+
+# Define an array of bags to process
 bags=("june_1" "june_8" "june_29" "july_13")
 
 for bag in "${bags[@]}"; do
@@ -53,34 +65,48 @@ for bag in "${bags[@]}"; do
 
     odom_bag=$map_odom_dir/$bag
     printf "${CYAN}Recording ${MAP_ODOM_TOPIC} to ${odom_bag}.bag${NC}\n"
-    rosbag record -O $odom_bag $MAP_ODOM_TOPIC &>$exp_dir/rosbag_record.txt& 
+    rosbag record -O $odom_bag $MAP_ODOM_TOPIC &>$exp_dir/rosbag_record.txt &
     
-    #running the filter
-    python $FILTER_SCRIPT --model ktima &>$exp_dir/filter.txt&
+    # Run the filter in the background
+    printf "${CYAN}Running filter ...${NC}\n"
+    nohup python $FILTER_SCRIPT --model ktima &>$exp_dir/filter.txt &
 
+    # Run fast_lio in the background
     printf "${CYAN}Running fast-lio background ... ${NC}\n"
-    roslaunch fast_lio mapping_ouster16_filter.launch &>$exp_dir/mapping_log.txt& 
+    nohup roslaunch fast_lio mapping_ouster16_filter.launch &>$exp_dir/mapping_log.txt & 
     sleep 5   
 
     bag_dir=$BAGS_REMOTE_DIR/$bag.bag
-    ssh ibrahim@$REMOTE_IP "source /opt/ros/melodic/setup.bash && rosbag play ${bag_dir} \
-                            --topics $IMU_TOPIC $POINTS_TOPIC -r ${PLAY_RATE} --clock"
 
-    rosnode kill -a # kill all the nodes 
-    killall -9 roscore
-    killall -9 rosmaster
+    # Check if the bag file exists on the remote machine
+    if ! ssh ibrahim@$REMOTE_IP "[ -f ${bag_dir} ]"; then
+        error "Bag file not found on remote machine: ${bag_dir}"
+    fi
+
+    printf "${CYAN}Playing ${bag_dir} on remote machine${NC}\n"
+    ssh ibrahim@$REMOTE_IP "source /opt/ros/melodic/setup.bash && rosbag play ${bag_dir} \
+                            --topics $IMU_TOPIC $POINTS_TOPIC -r ${PLAY_RATE} --clock" || error "Failed to play rosbag on remote machine"
+
+    # Kill all ROS nodes
+    printf "${CYAN}Killing all ROS nodes${NC}\n"
+    rosnode kill -a >/dev/null 2>&1 || true # Ignore errors if there are no nodes to kill
+
+    # Kill all background processes
+    printf "${CYAN}Killing all background processes${NC}\n"
+    kill $(jobs -p) >/dev/null 2>&1 || true # Ignore errors if there are no background processes to kill
     sleep 5
 
-    printf "${CYAN}Saving ${MAP_ODOM_TOPIC} as .tum format${NC}\n"
-    evo_traj bag $odom_bag.bag $MAP_ODOM_TOPIC --save_as_tum
+    # Convert the odometry topic to .tum format
+    printf "${CYAN}Converting ${MAP_ODOM_TOPIC} to .tum format${NC}\n"
+    evo_traj bag $odom_bag.bag $MAP_ODOM_TOPIC --save_as_tum || error "Failed to convert odometry topic to .tum format"
     mv Odometry.tum $map_odom_dir/$bag.tum
-    rm -r $odom_bag.bag
+    rm -f $odom_bag.bag
 
+    # Move the PCD map to the raw PCD folder
     pcd_map=$pcd_dir/$bag.pcd
-    printf "${CYAN}Moving pcd map to ${pcd_map}${NC}\n"
-    mv ${FASTLIO_PCD_DIR}/scans.pcd ${pcd_map} #move map to the raw pcd folder 
+    printf "${CYAN}Moving PCD map to ${pcd_map}${NC}\n"
+    mv ${FASTLIO_PCD_DIR}/scans.pcd ${pcd_map} || error "Failed to move PCD map to ${pcd_map}"
 
     printf "======================================================\n"
 
 done
-
