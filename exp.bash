@@ -57,35 +57,44 @@ bags=("june_1" "june_8" "june_29" "july_13")
 for bag in "${bags[@]}"; do
     printf "Mapping: ${BLUE}${bag}${NC} ...\n"
     exp_dir=$bag
+    log_dir=$exp_dir/log
     pcd_dir=$exp_dir/pcd
     map_odom_dir=$exp_dir/map_odom
 
+    # Kill all ROS nodes
+    printf "${CYAN}Killing all ROS nodes${NC}\n"
+    rosnode kill -a >/dev/null 2>&1 || true # Ignore errors if there are no nodes to kill
+
+    mkdir -p $log_dir
     mkdir -p $pcd_dir
     mkdir -p $map_odom_dir 
 
     odom_bag=$map_odom_dir/$bag
     printf "${CYAN}Recording ${MAP_ODOM_TOPIC} to ${odom_bag}.bag${NC}\n"
-    rosbag record -O $odom_bag $MAP_ODOM_TOPIC &>$exp_dir/rosbag_record.txt &
+    rosbag record -O $odom_bag $MAP_ODOM_TOPIC &>$log_dir/rosbag_record.txt &
     
     # Run the filter in the background
     printf "${CYAN}Running filter ...${NC}\n"
-    nohup python $FILTER_SCRIPT --model ktima &>$exp_dir/filter.txt &
-
+    nohup python $FILTER_SCRIPT --model ktima &>$log_dir/filter.txt &
+    sleep 5
+    
     # Run fast_lio in the background
     printf "${CYAN}Running fast-lio background ... ${NC}\n"
-    nohup roslaunch fast_lio mapping_ouster16_filter.launch &>$exp_dir/mapping_log.txt & 
+    nohup roslaunch fast_lio mapping_ouster16_filter.launch &>$log_dir/mapping_log.txt & 
     sleep 5   
 
-    bag_dir=$BAGS_REMOTE_DIR/$bag.bag
+    bag_path=$BAGS_REMOTE_DIR/$bag.bag
 
     # Check if the bag file exists on the remote machine
-    if ! ssh ibrahim@$REMOTE_IP "[ -f ${bag_dir} ]"; then
-        error "Bag file not found on remote machine: ${bag_dir}"
+    if ! ssh ibrahim@$REMOTE_IP "[ -f ${bag_path} ]"; then
+        error "Bag file not found on remote machine: ${bag_path}"
     fi
 
-    printf "${CYAN}Playing ${bag_dir} on remote machine${NC}\n"
-    ssh ibrahim@$REMOTE_IP "source /opt/ros/melodic/setup.bash && rosbag play ${bag_dir} \
-                            --topics $IMU_TOPIC $POINTS_TOPIC -r ${PLAY_RATE} --clock" || error "Failed to play rosbag on remote machine"
+
+    printf "${CYAN}Playing ${bag_path} on remote machine${NC}\n"
+    ssh ibrahim@$REMOTE_IP "source /opt/ros/melodic/setup.bash && rosbag play ${bag_path} \
+                            --topics $IMU_TOPIC $POINTS_TOPIC -r ${PLAY_RATE} --clock     \
+                            --duration=640 " || error "Failed to play rosbag on remote machine"
 
     # Kill all ROS nodes
     printf "${CYAN}Killing all ROS nodes${NC}\n"
